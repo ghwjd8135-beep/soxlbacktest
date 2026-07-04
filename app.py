@@ -23,105 +23,125 @@ def run_backtest(df, breakout_pct, stoploss_pct, fee_pct):
     df = df.sort_values('datetime').reset_index(drop=True)
     df['date'] = df['datetime'].dt.date
     dates = sorted(df['date'].unique())
+
     trades = []
 
-    for i in range(len(dates) - 1):
-        prev_date = dates[i]
-        curr_date = dates[i + 1]
-        prev_day = df[df['date'] == prev_date]
-        curr_day = df[df['date'] == curr_date].reset_index(drop=True)
-
-        if prev_day.empty or curr_day.empty:
+    for i, d in enumerate(dates):
+        day_df = df[df['date'] == d].reset_index(drop=True)
+        if day_df.empty:
             continue
 
-        prev_high = prev_day['high'].max()
-        prev_low = prev_day['low'].min()
-        day_range = prev_high - prev_low
+        day_open = day_df.loc[0, 'open']
+        breakout_price = day_open * (1 + breakout_pct)
 
-        today_open = curr_day.iloc[0]['open']
-        target_price = today_open + day_range * breakout_pct
-        stop_price = target_price * (1 - stoploss_pct)
+        # 당일 중 돌파가 최초 도달 시점 찾기
+        breakout_idx = None
+        for j in range(len(day_df)):
+            if day_df.loc[j, 'high'] >= breakout_price:
+                breakout_idx = j
+                break
 
-        position = False
-        entry_price = None
-        entry_time = None
+        if breakout_idx is None:
+            continue  # 돌파 없음, 매수 안함
+
+        buy_price = breakout_price
+        buy_time = day_df.loc[breakout_idx, 'datetime']
+        stoploss_price = buy_price * (1 - stoploss_pct)
+
+        # 돌파 발생 이후 봉들에서 손절 체크 (같은 날, 매수 시점 이후)
         exit_price = None
         exit_time = None
+        exit_reason = None
 
-        for idx, row in curr_day.iterrows():
-            if not position:
-                if row['high'] >= target_price:
-                    position = True
-                    entry_price = target_price
-                    entry_time = row['datetime']
+        for k in range(breakout_idx, len(day_df)):
+            if day_df.loc[k, 'low'] <= stoploss_price:
+                exit_price = stoploss_price
+                exit_time = day_df.loc[k, 'datetime']
+                exit_reason = "손절"
+                break
+
+        if exit_price is None:
+            # 당일 손절 안됨 -> 익일 시가 청산
+            if i + 1 < len(dates):
+                next_day = dates[i + 1]
+                next_day_df = df[df['date'] == next_day].reset_index(drop=True)
+                if not next_day_df.empty:
+                    exit_price = next_day_df.loc[0, 'open']
+                    exit_time = next_day_df.loc[0, 'datetime']
+                    exit_reason = "익일시가청산"
+                else:
+                    continue  # 다음날 데이터 없음 -> 결과 제외
             else:
-                if row['low'] <= stop_price:
-                    exit_price = stop_price
-                    exit_time = row['datetime']
-                    break
+                continue  # 마지막 날짜라 익일 데이터 없음 -> 결과 제외
 
-        if position and exit_price is None:
-            last_row = curr_day.iloc[-1]
-            exit_price = last_row['close']
-            exit_time = last_row['datetime']
+        # 수수료 반영 (매수/매도 편도 각각)
+        buy_price_fee = buy_price * (1 + fee_pct)
+        exit_price_fee = exit_price * (1 - fee_pct)
 
-        if position:
-            gross_pnl_pct = (exit_price - entry_price) / entry_price
-            net_pnl_pct = gross_pnl_pct - fee_pct * 2
-            trades.append({
-                'date': curr_date,
-                'entry_time': entry_time,
-                'entry_price': entry_price,
-                'exit_time': exit_time,
-                'exit_price': exit_price,
-                'pnl_pct': net_pnl_pct
-            })
+        ret_pct = (exit_price_fee - buy_price_fee) / buy_price_fee
 
-    return pd.DataFrame(trades)
+        trades.append({
+            "매수일": d,
+            "매수시각": buy_time,
+            "매수가": buy_price,
+            "매도시각": exit_time,
+            "매도가": exit_price,
+            "청산유형": exit_reason,
+            "수익률(%)": ret_pct * 100
+        })
+
+    trades_df = pd.DataFrame(trades)
+    return trades_df
+
+
+def calc_equity_curve(trades_df, initial_capital):
+    equity = [initial_capital]
+    for r in trades_df['수익률(%)']:
+        equity.append(equity[-1] * (1 + r / 100))
+    trades_df = trades_df.copy()
+    trades_df['자본금'] = equity[1:]
+    return trades_df
+
 
 # ---------------------------
 # 메인 로직
 # ---------------------------
 if uploaded is not None:
-    df = pd.read_csv(
-        uploaded,
-        header=None,
-        names=['datetime', 'open', 'high', 'low', 'close', 'volume']
-    )
-    df['datetime'] = pd.to_datetime(df['datetime'])
+    raw_df = pd.read_csv(uploaded)
+    raw_df['datetime'] = pd.to_datetime(raw_df['datetime'])
 
-    # 정규장 시간(09:30~16:00 ET)만 필터링
-    df['time'] = df['datetime'].dt.time
-    market_open = pd.to_datetime('09:30:00').time()
-    market_close = pd.to_datetime('16:00:00').time()
-    df = df[(df['time'] >= market_open) & (df['time'] <= market_close)].reset_index(drop=True)
-    df = df.drop(columns=['time'])
-
-    result_df = run_backtest(df, breakout_pct, stoploss_pct, fee_pct)
+    with st.spinner("백테스트 실행 중..."):
+        result_df = run_backtest(raw_df, breakout_pct, stoploss_pct, fee_pct)
 
     if result_df.empty:
-        st.warning("매매 결과가 없습니다. 돌파율 조건을 확인해보세요.")
+        st.warning("조건에 맞는 거래가 없습니다.")
     else:
-        result_df['cum_return'] = (1 + result_df['pnl_pct']).cumprod()
+        result_df = calc_equity_curve(result_df, initial_capital)
 
+        # ---------------------------
+        # 성과 지표
+        # ---------------------------
         total_trades = len(result_df)
-        win_trades = (result_df['pnl_pct'] > 0).sum()
+        win_trades = (result_df['수익률(%)'] > 0).sum()
         win_rate = win_trades / total_trades * 100
-        final_capital = initial_capital * result_df['cum_return'].iloc[-1]
-        total_return_pct = (final_capital - initial_capital) / initial_capital * 100
+        total_return = (result_df['자본금'].iloc[-1] / initial_capital - 1) * 100
+        avg_return = result_df['수익률(%)'].mean()
+        mdd = ((result_df['자본금'].cummax() - result_df['자본금']) / result_df['자본금'].cummax()).max() * 100
 
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("총 거래 수", total_trades)
-        col2.metric("승률", f"{win_rate:.1f}%")
-        col3.metric("최종 자본", f"${final_capital:,.2f}")
-        col4.metric("총 수익률", f"{total_return_pct:.1f}%")
+        col1, col2, col3, col4, col5 = st.columns(5)
+        col1.metric("총 거래수", f"{total_trades} 회")
+        col2.metric("승률", f"{win_rate:.1f} %")
+        col3.metric("총 수익률", f"{total_return:.1f} %")
+        col4.metric("평균 수익률/거래", f"{avg_return:.2f} %")
+        col5.metric("MDD", f"{mdd:.1f} %")
 
-        st.subheader("📊 자산 곡선")
-        equity_df = result_df[['date', 'cum_return']].copy()
-        equity_df['equity'] = initial_capital * equity_df['cum_return']
-        st.line_chart(equity_df.set_index('date')['equity'])
+        st.subheader("📊 자본금 변화")
+        st.line_chart(result_df.set_index('매수일')['자본금'])
 
         st.subheader("📋 거래 내역")
-        st.dataframe(result_df)
+        st.dataframe(result_df, use_container_width=True)
+
+        csv = result_df.to_csv(index=False).encode('utf-8-sig')
+        st.download_button("결과 CSV 다운로드", data=csv, file_name="backtest_result.csv", mime="text/csv")
 else:
-    st.info("CSV 파일을 업로드해주세요.")
+    st.info("👆 1분봉 CSV 파일을 업로드해주세요.")
