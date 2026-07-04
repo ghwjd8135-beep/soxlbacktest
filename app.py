@@ -107,11 +107,13 @@ def calc_equity_curve(trades_df, initial_capital):
 # 메인 로직
 # ---------------------------
 if uploaded is not None:
-    raw_df = pd.read_csv(uploaded)
-    raw_df['datetime'] = pd.to_datetime(raw_df['datetime'])
+raw_df = pd.read_csv(
+    uploaded,
+    header=None,
+    names=["datetime", "open", "high", "low", "close", "volume"]
+)
+raw_df['datetime'] = pd.to_datetime(raw_df['datetime'])
 
-    with st.spinner("백테스트 실행 중..."):
-        result_df = run_backtest(raw_df, breakout_pct, stoploss_pct, fee_pct)
 
     if result_df.empty:
         st.warning("조건에 맞는 거래가 없습니다.")
