@@ -14,7 +14,7 @@ stoploss_pct = st.sidebar.slider("손절율 (%)", 0.5, 10.0, 3.0, 0.1) / 100
 fee_pct = st.sidebar.number_input("편도 수수료+슬리피지 (%)", value=0.05, step=0.01) / 100
 initial_capital = st.sidebar.number_input("초기 자본금 ($)", value=10000, step=1000)
 
-uploaded = st.file_uploader("1분봉 CSV 업로드 (columns: datetime, open, high, low, close, volume)", type="csv")
+uploaded = st.file_uploader("1분봉 CSV 업로드 (헤더 없이: datetime, open, high, low, close, volume 순서)", type="csv")
 
 # ---------------------------
 # 백테스트 함수
@@ -45,7 +45,7 @@ def run_backtest(df, breakout_pct, stoploss_pct, fee_pct):
                 break
 
         if buy_idx is None:
-            continue  # 돌파 없음, 매매 없음
+            continue
 
         buy_price = breakout_price
         stop_price = buy_price * (1 - stoploss_pct)
@@ -54,7 +54,6 @@ def run_backtest(df, breakout_pct, stoploss_pct, fee_pct):
         sell_type = None
         sell_time = None
 
-        # 매수 이후 캔들에서 손절 체크
         for idx in range(buy_idx, len(day_df)):
             row = day_df.loc[idx]
             if row['low'] <= stop_price:
@@ -63,7 +62,6 @@ def run_backtest(df, breakout_pct, stoploss_pct, fee_pct):
                 sell_time = row['datetime']
                 break
 
-        # 손절 안 걸리면 익일 시가 매도
         if sell_price is None:
             sell_price = next_df.loc[0, 'open']
             sell_type = "익일시가"
@@ -92,12 +90,16 @@ def run_backtest(df, breakout_pct, stoploss_pct, fee_pct):
 # 실행 및 결과 출력
 # ---------------------------
 if uploaded is not None:
- df = pd.read_csv(
-    uploaded,
-    header=None,
-    names=['datetime', 'open', 'high', 'low', 'close', 'volume']
-)
-df['datetime'] = pd.to_datetime(df['datetime'])
+    df = pd.read_csv(
+        uploaded,
+        header=None,
+        names=['datetime', 'open', 'high', 'low', 'close', 'volume']
+    )
+    df['datetime'] = pd.to_datetime(df['datetime'])
+
+    if st.button("🚀 백테스트 실행"):
+        with st.spinner("백테스트 진행 중..."):
+            result_df = run_backtest(df, breakout_pct, stoploss_pct, fee_pct)
 
         if result_df.empty:
             st.warning("매매 결과가 없습니다. 돌파율 조건을 확인해보세요.")
