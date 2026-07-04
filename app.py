@@ -92,11 +92,12 @@ def run_backtest(df, breakout_pct, stoploss_pct, fee_pct):
 # 실행 및 결과 출력
 # ---------------------------
 if uploaded is not None:
-    df = pd.read_csv(uploaded, parse_dates=['datetime'])
-
-    if st.button("🚀 백테스트 실행"):
-        with st.spinner("백테스트 진행 중..."):
-            result_df = run_backtest(df, breakout_pct, stoploss_pct, fee_pct)
+ df = pd.read_csv(
+    uploaded,
+    header=None,
+    names=['datetime', 'open', 'high', 'low', 'close', 'volume']
+)
+df['datetime'] = pd.to_datetime(df['datetime'])
 
         if result_df.empty:
             st.warning("매매 결과가 없습니다. 돌파율 조건을 확인해보세요.")
