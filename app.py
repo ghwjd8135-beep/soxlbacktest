@@ -5,7 +5,7 @@ from datetime import time
 
 st.set_page_config(page_title="Hojay의 변동성돌파매매 과거추적", layout="wide")
 
-st.title("📈 SOXL 변동성 돌파 매매 백테스트 (복리 + MDD + 매매로그)")
+st.title("📈 Hojay의 변동성돌파매매 백테스트 (복리 + MDD + 매매로그)")
 
 st.sidebar.header("⚙️ 전략 파라미터")
 breakout_pct = st.sidebar.slider("돌파율 (%)", 0.5, 10.0, 2.0, 0.1) / 100
