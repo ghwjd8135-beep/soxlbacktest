@@ -4,7 +4,7 @@ import numpy as np
 from datetime import time
 
 st.set_page_config(page_title="SOXL 변동성 돌파 백테스트", layout="wide")
-st.title("📈 SOXL 변동성 돌파 매매 백테스트 (복리)")
+st.title("📈 SOXL 변동성 돌파 매매 백테스트 (복리 + MDD + 매매로그)")
 
 st.sidebar.header("⚙️ 전략 파라미터")
 breakout_pct = st.sidebar.slider("돌파율 (%)", 0.5, 10.0, 2.0, 0.1) / 100
@@ -24,100 +24,138 @@ if uploaded is not None:
     df = df.sort_values('datetime').reset_index(drop=True)
     df['date'] = df['datetime'].dt.date
     df['time'] = df['datetime'].dt.time
+    df = df[(df['time'] >= MARKET_OPEN) & (df['time'] <= MARKET_CLOSE)]
 
-    session = df[(df['time'] >= MARKET_OPEN) & (df['time'] <= MARKET_CLOSE)].copy()
-    dates = sorted(session['date'].unique())
+    dates = sorted(df['date'].unique())
 
-    trades = []
     capital = initial_capital
+    trade_log = []
+    equity_curve = []  # (날짜, 자본금)
+    pending_entry = None  # {'entry_date','entry_time','entry_price'}
 
-    for i in range(len(dates) - 1):
-        today = dates[i]
-        next_day = dates[i + 1]
-
-        day_data = session[session['date'] == today].sort_values('datetime')
+    for d in dates:
+        day_data = df[df['date'] == d].reset_index(drop=True)
         if day_data.empty:
             continue
 
         day_open = day_data.iloc[0]['open']
-        breakout_price = day_open * (1 + breakout_pct)
-        stop_price = breakout_price * (1 - stoploss_pct)
 
+        # 1) 전날 매수 후 손절 안 나가고 넘어온 포지션 -> 오늘 시가에 청산
+        if pending_entry is not None:
+            exit_price = day_open
+            exit_time = day_data.iloc[0]['datetime']
+
+            buy_eff = pending_entry['entry_price'] * (1 + fee_pct)
+            sell_eff = exit_price * (1 - fee_pct)
+            ret = sell_eff / buy_eff - 1
+            capital = capital * (1 + ret)
+
+            trade_log.append({
+                "진입일": pending_entry['entry_date'],
+                "진입시각": pending_entry['entry_time'],
+                "진입가": round(pending_entry['entry_price'], 4),
+                "청산일": d,
+                "청산시각": exit_time,
+                "청산가": round(exit_price, 4),
+                "청산유형": "익일시가",
+                "수익률(%)": round(ret * 100, 2),
+                "자본금": round(capital, 2),
+            })
+            equity_curve.append((exit_time, capital))
+            pending_entry = None
+
+        # 2) 오늘 당일 신규 진입 체크
+        breakout_price = day_open * (1 + breakout_pct)
         entry_price = None
         entry_time = None
-        exit_price = None
-        exit_time = None
-        exit_reason = None
+        stop_price = None
+        exited_today = False
 
-        for idx, row in day_data.iterrows():
+        for _, row in day_data.iterrows():
             if entry_price is None:
                 if row['high'] >= breakout_price:
                     entry_price = breakout_price
                     entry_time = row['datetime']
-                    # 매수 체결 봉에서도 손절 조건 즉시 확인 (버그 수정 포인트)
+                    stop_price = entry_price * (1 - stoploss_pct)
+                    # 매수 체결된 바로 그 봉에서도 손절 체크 (버그 수정 유지)
                     if row['low'] <= stop_price:
                         exit_price = stop_price
                         exit_time = row['datetime']
-                        exit_reason = "손절(매수당일)"
+                        exited_today = True
                         break
             else:
                 if row['low'] <= stop_price:
                     exit_price = stop_price
                     exit_time = row['datetime']
-                    exit_reason = "손절(매수당일)"
+                    exited_today = True
                     break
 
-        if entry_price is None:
-            continue  # 돌파 없었던 날 -> 매매 없음
+        if entry_price is not None and exited_today:
+            buy_eff = entry_price * (1 + fee_pct)
+            sell_eff = exit_price * (1 - fee_pct)
+            ret = sell_eff / buy_eff - 1
+            capital = capital * (1 + ret)
 
-        if exit_price is None:
-            next_day_data = session[session['date'] == next_day].sort_values('datetime')
-            if next_day_data.empty:
-                continue
-            exit_price = next_day_data.iloc[0]['open']
-            exit_time = next_day_data.iloc[0]['datetime']
-            exit_reason = "익일시가매도"
+            trade_log.append({
+                "진입일": d,
+                "진입시각": entry_time,
+                "진입가": round(entry_price, 4),
+                "청산일": d,
+                "청산시각": exit_time,
+                "청산가": round(exit_price, 4),
+                "청산유형": "손절",
+                "수익률(%)": round(ret * 100, 2),
+                "자본금": round(capital, 2),
+            })
+            equity_curve.append((exit_time, capital))
 
-        buy_cost = entry_price * (1 + fee_pct)
-        sell_revenue = exit_price * (1 - fee_pct)
-        ret_pct = (sell_revenue - buy_cost) / buy_cost
+        elif entry_price is not None and not exited_today:
+            pending_entry = {
+                "entry_date": d,
+                "entry_time": entry_time,
+                "entry_price": entry_price,
+            }
+        # entry_price is None -> 오늘 매매 없음
 
-        capital_before = capital
-        capital = capital * (1 + ret_pct)
+    # 백테스트 종료 시점에 미청산 포지션이 남아있으면 안내만
+    if pending_entry is not None:
+        st.warning(
+            f"⚠️ 마지막 포지션이 청산되지 않았습니다 "
+            f"(진입일: {pending_entry['entry_date']}, 진입가: {pending_entry['entry_price']:.4f}). "
+            f"통계 계산에서는 제외했습니다."
+        )
 
-        trades.append({
-            "매수일": today,
-            "청산일": exit_time.date(),
-            "매수시각": entry_time,
-            "청산시각": exit_time,
-            "매수가": round(entry_price, 4),
-            "청산가": round(exit_price, 4),
-            "청산사유": exit_reason,
-            "수익률(%)": round(ret_pct * 100, 3),
-            "매매전자본": round(capital_before, 2),
-            "매매후자본": round(capital, 2),
-        })
-
-    result_df = pd.DataFrame(trades)
-
-    if result_df.empty:
-        st.warning("조건에 맞는 매매가 없습니다.")
+    if len(trade_log) == 0:
+        st.info("조건에 맞는 매매가 없습니다.")
     else:
-        st.subheader("📊 매매 결과")
-        st.dataframe(result_df, use_container_width=True)
+        log_df = pd.DataFrame(trade_log)
+        equity_df = pd.DataFrame(equity_curve, columns=["일시", "자본금"])
 
-        total_return = (capital - initial_capital) / initial_capital * 100
-        win_trades = result_df[result_df['수익률(%)'] > 0]
-        win_rate = len(win_trades) / len(result_df) * 100
+        # MDD 계산
+        equity_df["누적최고"] = equity_df["자본금"].cummax()
+        equity_df["drawdown"] = (equity_df["자본금"] - equity_df["누적최고"]) / equity_df["누적최고"]
+        mdd = equity_df["drawdown"].min()
 
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("총 매매 횟수", f"{len(result_df)}회")
-        col2.metric("승률", f"{win_rate:.1f}%")
-        col3.metric("최종 자본", f"${capital:,.2f}")
-        col4.metric("총 수익률", f"{total_return:.2f}%")
+        total_return = (capital / initial_capital - 1) * 100
+        win_trades = (log_df["수익률(%)"] > 0).sum()
+        win_rate = win_trades / len(log_df) * 100
+        stoploss_count = (log_df["청산유형"] == "손절").sum()
+        overnight_count = (log_df["청산유형"] == "익일시가").sum()
 
-        st.subheader("📈 자산 곡선 (복리)")
-        st.line_chart(result_df.set_index("청산시각")["매매후자본"])
+        st.subheader("📊 백테스트 요약")
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("최종 자본금", f"${capital:,.0f}")
+        c2.metric("총 수익률", f"{total_return:.2f}%")
+        c3.metric("MDD", f"{mdd*100:.2f}%")
+        c4.metric("승률", f"{win_rate:.1f}%")
+        c5.metric("총 매매횟수", f"{len(log_df)} (손절 {stoploss_count} / 익일 {overnight_count})")
 
-        st.subheader("📉 청산 사유별 통계")
-        st.dataframe(result_df['청산사유'].value_counts())
+        st.subheader("📉 자본금 곡선 & Drawdown")
+        st.line_chart(equity_df.set_index("일시")[["자본금"]])
+        st.line_chart(equity_df.set_index("일시")[["drawdown"]])
+
+        st.subheader("📋 전체 매매 로그")
+        st.dataframe(log_df, use_container_width=True)
+
+        csv = log_df.to_csv(index=False).encode("utf-8-sig")
+        st.download_button("매매 로그 CSV 다운로드", csv, "trade_log.csv", "text/csv")
