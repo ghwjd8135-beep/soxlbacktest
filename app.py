@@ -3,7 +3,8 @@ import pandas as pd
 import numpy as np
 from datetime import time
 
-st.set_page_config(page_title="SOXL 변동성 돌파 백테스트", layout="wide")
+st.set_page_config(page_title="Hojay의 변동성돌파매매 과거추적", layout="wide")
+
 st.title("📈 SOXL 변동성 돌파 매매 백테스트 (복리 + MDD + 매매로그)")
 
 st.sidebar.header("⚙️ 전략 파라미터")
